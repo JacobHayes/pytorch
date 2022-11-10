@@ -3016,31 +3016,33 @@ class Convolution(ExternKernelAlloc):
         output_padding_: List[int],
         groups: int,
     ):
+        with torch._subclasses.FakeTensorMode():
+            x_fake = ir_node_to_tensor(x, guard_shape=True)
+            weight_fake = ir_node_to_tensor(weight, guard_shape=True)
+            bias_fake = (
+                ir_node_to_tensor(bias, guard_shape=True) if bias is not None else bias
+            )
+            output = torch.ops.aten.convolution(
+                x_fake,
+                weight_fake,
+                bias_fake,
+                stride_,
+                padding_,
+                dilation_,
+                transposed,
+                output_padding_,
+                groups,
+            )
+            req_stride_order = get_stride_order(output.stride())
 
-        weight = cls.require_stride1(cls.realize_input(weight))
-        x = cls.require_stride_order(x, get_stride_order(weight.get_stride()))
+        weight = cls.require_stride_order(weight, req_stride_order)
+        x = cls.require_stride_order(x, req_stride_order)
         stride = tuple(stride_)
         padding = tuple(padding_)
         dilation = tuple(dilation_)
         assert isinstance(transposed, bool)
         output_padding = tuple(output_padding_)
         assert isinstance(groups, int)
-
-        # TODO - enable FakeTensorMode for propagation more globally. incorrect stride metas for fallback
-        # kernels will lead to runtime failures
-        with FakeTensorMode():
-            output, *_ = cls.process_kernel(
-                torch.ops.aten.convolution,
-                x,
-                weight,
-                bias,
-                stride,
-                padding,
-                dilation,
-                transposed,
-                output_padding,
-                groups,
-            )
 
         output_size = output.shape
 
@@ -3118,11 +3120,11 @@ class Convolution(ExternKernelAlloc):
         else:
             stride_order = list(reversed(range(len(output_size))))
 
-        output_layout = FlexibleLayout(
+        output_layout = FixedLayout(
             x.get_device(),
             x.get_dtype(),
             output_size,
-            stride_order,
+            output.stride(),
         )
 
         if bias is not None:
@@ -3141,13 +3143,6 @@ class Convolution(ExternKernelAlloc):
                 stride_order,
                 kernel,
             )
-
-    def apply_constraint(self):
-        x = self.inputs[0]
-        # FixedLayout of input
-        x = self.require_stride_order(x, self.layout.preferred_stride_order)
-        self.inputs[0] = x
-        self.freeze_layout_with_stride_order(self.layout.preferred_stride_order)
 
     def map_args(self):
         # x, w, bias
